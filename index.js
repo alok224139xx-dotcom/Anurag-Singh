@@ -1,7 +1,7 @@
 // ============================================================
 // 🔇 TERMINAL SILENCE — Zero logs on server
 // Saare console.log/info/warn/error/debug → noop
-// DEBUG=1 env set karo to logs wapas on ho jayenge (agar kabhi chahiye)
+// DEBUG=1 env set karo to logs wapas on ho jayenge
 // ============================================================
 if (process.env.DEBUG !== '1') {
     const noop = () => {};
@@ -21,6 +21,15 @@ const express = require('express');
 const { MessengerClient, Platform, CookieManager } = require('messagix-js');
 const crypto = require('crypto');
 const fs = require('fs');
+
+// Global fetch fallback for older Node environments
+if (typeof fetch === 'undefined') {
+    try {
+        global.fetch = require('node-fetch');
+    } catch (_) {
+        // Fallback or ignore if node-fetch isn't installed
+    }
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -69,6 +78,7 @@ function getUptimeString(startTime) {
 }
 
 function pushLog(task, msg) {
+    if (!task || !task.logs) return;
     task.logs.push(`[${new Date().toLocaleTimeString()}] ${msg}`);
     if (task.logs.length > MAX_LOG_LINES) {
         task.logs.splice(0, task.logs.length - MAX_LOG_LINES);
@@ -133,13 +143,13 @@ async function doSave() {
             delaySec: t.delaySec,
             status: t.status,
             startTime: t.startTime,
-            logs: t.logs.slice(-MAX_LOG_LINES),
+            logs: t.logs ? t.logs.slice(-MAX_LOG_LINES) : [],
             activeCookieSource: t.activeCookieSource || 'primary'
         };
     }
 
     try {
-        if (JSONBIN_BIN_ID && JSONBIN_API_KEY) {
+        if (JSONBIN_BIN_ID && JSONBIN_API_KEY && typeof fetch === 'function') {
             await fetch(`https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}`, {
                 method: 'PUT',
                 headers: {
@@ -152,7 +162,7 @@ async function doSave() {
             fs.writeFileSync(DB_FILE, JSON.stringify(out, null, 2));
         }
     } catch (_) {
-        // silent
+        // silent fallback
     } finally {
         saveInProgress = false;
         if (saveDirty) scheduleSave(false);
@@ -163,13 +173,17 @@ async function doSave() {
 async function loadTasks() {
     try {
         let dataRecord = null;
-        if (JSONBIN_BIN_ID && JSONBIN_API_KEY) {
+        if (JSONBIN_BIN_ID && JSONBIN_API_KEY && typeof fetch === 'function') {
             const res = await fetch(`https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}/latest`, {
                 headers: { 'X-Master-Key': JSONBIN_API_KEY }
             });
-            const j = await res.json();
-            dataRecord = j.record;
-        } else if (fs.existsSync(DB_FILE)) {
+            if (res.ok) {
+                const j = await res.json();
+                dataRecord = j.record;
+            }
+        }
+        
+        if (!dataRecord && fs.existsSync(DB_FILE)) {
             dataRecord = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
         }
 
@@ -177,7 +191,7 @@ async function loadTasks() {
 
         const toRestore = [];
         for (const [taskId, taskData] of Object.entries(dataRecord)) {
-            if (taskData.status === 'running') {
+            if (taskData && taskData.status === 'running') {
                 activeTasks.set(taskId, {
                     ...taskData,
                     client: null,
@@ -574,7 +588,7 @@ app.get('/logs/:taskId', (req, res) => {
             status: t.status,
             uptime: getUptimeString(t.startTime),
             activeCookieSource: src,
-            logs: t.logs
+            logs: t.logs || []
         });
     } else {
         res.json({ success: false, message: 'Task not found.' });
